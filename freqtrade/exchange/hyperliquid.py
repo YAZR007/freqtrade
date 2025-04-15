@@ -3,6 +3,7 @@
 import logging
 from copy import deepcopy
 from datetime import datetime
+from typing import Any, Optional, List, Dict
 
 from freqtrade.constants import BuySell
 from freqtrade.enums import MarginMode, TradingMode
@@ -51,6 +52,16 @@ class Hyperliquid(Exchange):
         config.update(super()._ccxt_config)
         return config
 
+    def _add_vault_params(self, params: dict | None = None) -> dict:
+        """
+        Adds vault address to params if vault trading is enabled
+        """
+        params = params or {}
+        if self._config['exchange'].get('isVault', False):
+            vault_address = self._config['exchange'].get('walletAddress')
+            params.update({"vaultAddress": vault_address})
+        return params
+
     def get_max_leverage(self, pair: str, stake_amount: float | None) -> float:
         # There are no leverage tiers
         if self.trading_mode == TradingMode.FUTURES:
@@ -63,8 +74,11 @@ class Hyperliquid(Exchange):
             # Hyperliquid expects leverage to be an int
             leverage = int(leverage)
             # Hyperliquid needs the parameter leverage.
+            params = {"leverage": leverage}
+            # Include vault address if vault trading is enabled
+            params = self._add_vault_params(params)
             # Don't use _set_leverage(), as this sets margin back to cross
-            self.set_margin_mode(pair, self.margin_mode, params={"leverage": leverage})
+            self.set_margin_mode(pair, self.margin_mode, params=params)
 
     def dry_run_liquidation_price(
         self,
@@ -158,6 +172,24 @@ class Hyperliquid(Exchange):
                 logger.warning(f"Could not update funding fees for {pair}.")
         return 0.0
 
+    def _get_params(
+        self,
+        side: BuySell,
+        ordertype: str,
+        leverage: float,
+        reduceOnly: bool,
+        time_in_force: str = "GTC",
+    ) -> dict:
+        params = super()._get_params(
+            side=side,
+            ordertype=ordertype,
+            leverage=leverage,
+            reduceOnly=reduceOnly,
+            time_in_force=time_in_force,
+        )
+        params = self._add_vault_params(params)
+        return params
+
     def _adjust_hyperliquid_order(
         self,
         order: dict,
@@ -172,11 +204,12 @@ class Hyperliquid(Exchange):
             and order["status"] in ("canceled", "closed")
             and order["filled"] > 0
         ):
+            params = self._add_vault_params()
             # Hyperliquid does not fill the average price in the order response
             # Fetch trades to calculate the average price to have the actual price
             # the order was executed at
             trades = self.get_trades_for_order(
-                order["id"], order["symbol"], since=dt_from_ts(order["timestamp"])
+                order["id"], order["symbol"], since=dt_from_ts(order["timestamp"]), params=params
             )
 
             if trades:
@@ -189,6 +222,8 @@ class Hyperliquid(Exchange):
         return order
 
     def fetch_order(self, order_id: str, pair: str, params: dict | None = None) -> CcxtOrder:
+        params = self._add_vault_params(params)
+
         order = super().fetch_order(order_id, pair, params)
 
         order = self._adjust_hyperliquid_order(order)
@@ -199,6 +234,8 @@ class Hyperliquid(Exchange):
     def fetch_orders(
         self, pair: str, since: datetime, params: dict | None = None
     ) -> list[CcxtOrder]:
+        params = self._add_vault_params(params)
+
         orders = super().fetch_orders(pair, since, params)
         for idx, order in enumerate(deepcopy(orders)):
             order2 = self._adjust_hyperliquid_order(order)
@@ -206,3 +243,24 @@ class Hyperliquid(Exchange):
 
         self._log_exchange_response("fetch_orders2", orders)
         return orders
+
+    def cancel_order(self, order_id: str, pair: str, params: dict | None = None) -> dict[str, Any]:
+        """
+        Override cancel_order to ensure vault parameters are included
+        """
+        params = self._add_vault_params(params)
+        return super().cancel_order(order_id, pair, params=params)
+
+    def get_trades_for_order(self, order_id: str, pair: str, since: datetime, params: dict | None = None) -> list:
+        """
+        Override get_trades_for_order to ensure vault parameters are included
+        """
+        params = self._add_vault_params(params)
+        return super().get_trades_for_order(order_id, pair, since, params=params)
+
+    def fetch_my_trades(self, pair: str | None = None, since: datetime | None = None, limit: int | None = None, params: dict | None = None) -> List[Dict]:
+        """
+        Override fetch_my_trades to ensure vault parameters are included
+        """
+        params = self._add_vault_params(params)
+        return super().fetch_my_trades(pair, since, limit, params=params)
